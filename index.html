@@ -587,6 +587,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;font
         <div class="ai-tab" onclick="switchTab('decisoes')" id="tab-decisoes">🎯 Tomada de Decisão</div>
         <div class="ai-tab" onclick="switchTab('cenarios')" id="tab-cenarios">🔭 Cenários</div>
         <div class="ai-tab" onclick="switchTab('acoes')" id="tab-acoes">⚡ Plano de Ação</div>
+        <div class="ai-tab" onclick="switchTab('perfil')" id="tab-perfil">👤 Perfil Pagador</div>
         <div class="ai-tab" onclick="switchTab('resumo')" id="tab-resumo" style="margin-left:auto;border-left:1px solid var(--border);padding-left:18px;color:#d29922">📋 Resumo Executivo</div>
       </div>
       <div id="canalSelectorBar" style="display:flex;align-items:center;gap:10px;padding:10px 22px;background:#0d1117;border-bottom:1px solid var(--border)">
@@ -610,6 +611,9 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;font
         </div>
         <div class="ai-tab-content" id="content-acoes">
           <div class="ai-placeholder"><div class="ai-placeholder-icon">⚡</div><div class="ai-placeholder-text">Plano de ação detalhado com responsáveis, prazos e métricas.</div></div>
+        </div>
+        <div class="ai-tab-content" id="content-perfil">
+          <div class="ai-placeholder"><div class="ai-placeholder-icon">👤</div><div class="ai-placeholder-text">Perfil do pagador por faixa de atraso, carteira e valor da dívida.</div></div>
         </div>
         <div class="ai-tab-content" id="content-resumo">
           <div class="ai-placeholder"><div class="ai-placeholder-icon">📋</div><div class="ai-placeholder-text">Gere a análise primeiro para ver o <strong>Resumo Executivo</strong> — visão rápida para a diretoria.</div></div>
@@ -1592,11 +1596,167 @@ function renderResumo(S, decisoesCards, acoesItems){
   document.getElementById('content-resumo').innerHTML=html;
 }
 
+function renderPerfilPagador(data){
+  // --- helpers ---
+  function agg(rows){
+    return rows.reduce((a,r)=>{
+      a.acordo+=(r.ACORDO||0); a.pgto+=(r.PAGAMENTOS||0);
+      a.valor+=(r.VALOR||0); a.valorPgto+=(r.VALOR_PGTO||0);
+      return a;
+    },{acordo:0,pgto:0,valor:0,valorPgto:0});
+  }
+  function txPgto(a){ return a.acordo>0?a.pgto/a.acordo:0; }
+  function efic(a){ return a.valor>0?a.valorPgto/a.valor:0; }
+  function fmtPct(v){ return (v*100).toFixed(1)+'%'; }
+  function fmtBRL(v){ return 'R$'+v.toLocaleString('pt-BR',{minimumFractionDigits:0,maximumFractionDigits:0}); }
+  function bar(v,max,color){
+    const pct=max>0?Math.min(v/max,1)*100:0;
+    return `<div style="height:6px;border-radius:3px;background:var(--border);margin-top:4px"><div style="height:6px;border-radius:3px;background:${color};width:${pct.toFixed(1)}%"></div></div>`;
+  }
+
+  // --- 1. Por FASE (faixa de atraso) ---
+  const byFase={};
+  data.forEach(r=>{ const f=r.FASE||'N/D'; if(!byFase[f])byFase[f]=[]; byFase[f].push(r); });
+  const faseStats=Object.entries(byFase).map(([fase,rows])=>({fase,...agg(rows),n:rows.length}));
+  // order fases naturally
+  faseStats.sort((a,b)=>{
+    const numA=parseInt((a.fase.match(/\d+/)||['9999'])[0]);
+    const numB=parseInt((b.fase.match(/\d+/)||['9999'])[0]);
+    return numA-numB;
+  });
+  const maxTxFase=Math.max(...faseStats.map(f=>txPgto(f)));
+  const bestFase=faseStats.reduce((a,b)=>txPgto(b)>txPgto(a)?b:a,faseStats[0]);
+
+  // --- 2. Por CARTEIRA ---
+  const byCart={};
+  data.forEach(r=>{ const c=r.CARTEIRA||'N/D'; if(!byCart[c])byCart[c]=[]; byCart[c].push(r); });
+  const cartStats=Object.entries(byCart).map(([cart,rows])=>({cart,...agg(rows),n:rows.length}));
+  cartStats.sort((a,b)=>txPgto(b)-txPgto(a));
+  const maxTxCart=Math.max(...cartStats.map(c=>txPgto(c)));
+  const topCarts=cartStats.slice(0,5);
+
+  // --- 3. Por FAIXA DE VALOR ---
+  const faixas=[
+    {label:'Até R$500',rows:[]},
+    {label:'R$500 – R$2k',rows:[]},
+    {label:'Acima R$2k',rows:[]}
+  ];
+  data.forEach(r=>{
+    const v=r.VALOR||0;
+    if(v<=500)faixas[0].rows.push(r);
+    else if(v<=2000)faixas[1].rows.push(r);
+    else faixas[2].rows.push(r);
+  });
+  const faixaStats=faixas.map(f=>({label:f.label,...agg(f.rows),n:f.rows.length}));
+  const maxTxFaixa=Math.max(...faixaStats.map(f=>txPgto(f)));
+  const bestFaixa=faixaStats.reduce((a,b)=>txPgto(b)>txPgto(a)?b:a,faixaStats[0]);
+
+  // --- sugestão estratégica ---
+  const bestCartLabel=cartStats.length>0?cartStats[0].cart:'—';
+  const bestCartTx=cartStats.length>0?txPgto(cartStats[0]):0;
+  let sug='';
+  if(bestFase&&bestFaixa){
+    sug=`Concentre esforços na faixa de atraso <strong>${bestFase.fase}</strong> (${fmtPct(txPgto(bestFase))} de conversão) com dívidas <strong>${bestFaixa.label}</strong>. A carteira <strong>${bestCartLabel}</strong> lidera o pagamento com ${fmtPct(bestCartTx)} — priorize esse segmento nas filas de discagem.`;
+  }
+
+  // --- render ---
+  const iaColor='var(--ia)'; const opColor='var(--op)'; const goldColor='#d29922';
+
+  let h=`<div style="padding:20px 24px;display:flex;flex-direction:column;gap:22px">`;
+
+  // header
+  h+=`<div style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);padding-bottom:14px">
+    <span style="font-size:22px">👤</span>
+    <div>
+      <div style="font-size:15px;font-weight:700;color:var(--fg)">Perfil do Pagador</div>
+      <div style="font-size:11px;color:var(--muted)">Conversão por faixa de atraso, carteira e valor da dívida</div>
+    </div>
+  </div>`;
+
+  // row layout
+  h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">`;
+
+  // BLOCO 1 — Por Fase
+  h+=`<div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:12px">⏱ Por Faixa de Atraso (FASE)</div>
+    <div style="display:flex;flex-direction:column;gap:8px">`;
+  faseStats.forEach(f=>{
+    const tx=txPgto(f);
+    const isBest=f.fase===bestFase.fase;
+    h+=`<div style="padding:8px 10px;border-radius:7px;background:${isBest?'rgba(139,92,246,0.12)':'var(--surface)'};border:1px solid ${isBest?'var(--ia)':'transparent'}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:12px;font-weight:600;color:${isBest?'var(--ia)':'var(--fg)'}">${f.fase}${isBest?' ⭐':''}</span>
+        <span style="font-size:13px;font-weight:700;color:${isBest?'var(--ia)':goldColor}">${fmtPct(tx)}</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${f.acordo} acordos · ${f.pgto} pagamentos · ${fmtBRL(f.valorPgto)}</div>
+      ${bar(tx,maxTxFase,isBest?'var(--ia)':'#555')}
+    </div>`;
+  });
+  h+=`</div></div>`;
+
+  // BLOCO 2 — Por Faixa de Valor
+  h+=`<div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:12px">💰 Por Faixa de Valor da Dívida</div>
+    <div style="display:flex;flex-direction:column;gap:10px">`;
+  faixaStats.forEach(f=>{
+    const tx=txPgto(f);
+    const isBest=f.label===bestFaixa.label;
+    const ef=efic(f);
+    h+=`<div style="padding:10px 12px;border-radius:7px;background:${isBest?'rgba(34,197,94,0.10)':'var(--surface)'};border:1px solid ${isBest?'#22c55e':'transparent'}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:12px;font-weight:600;color:${isBest?'#22c55e':'var(--fg)'}">${f.label}${isBest?' ⭐':''}</span>
+        <span style="font-size:13px;font-weight:700;color:${isBest?'#22c55e':goldColor}">${fmtPct(tx)}</span>
+      </div>
+      <div style="display:flex;gap:12px;margin-top:4px">
+        <span style="font-size:10px;color:var(--muted)">${f.n} registros</span>
+        <span style="font-size:10px;color:var(--muted)">${f.acordo} acordos</span>
+        <span style="font-size:10px;color:var(--muted)">Efic: ${fmtPct(ef)}</span>
+      </div>
+      ${bar(tx,maxTxFaixa,isBest?'#22c55e':'#555')}
+    </div>`;
+  });
+  h+=`</div></div>`;
+
+  h+=`</div>`; // end 2-col grid
+
+  // BLOCO 3 — Por Carteira (full width)
+  h+=`<div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:12px">🗂 Top Carteiras por Taxa de Pagamento</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">`;
+  topCarts.forEach((c,i)=>{
+    const tx=txPgto(c);
+    const colors=['var(--ia)','#22c55e',goldColor,'var(--op)','#64748b'];
+    const col=colors[i]||'#64748b';
+    h+=`<div style="padding:10px 12px;border-radius:8px;background:var(--surface);border:1px solid var(--border)">
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:4px">#${i+1}</div>
+      <div style="font-size:12px;font-weight:600;color:var(--fg);margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.cart}</div>
+      <div style="font-size:18px;font-weight:800;color:${col}">${fmtPct(tx)}</div>
+      <div style="font-size:10px;color:var(--muted)">${c.acordo} acord · ${fmtBRL(c.valorPgto)}</div>
+      ${bar(tx,maxTxCart,col)}
+    </div>`;
+  });
+  h+=`</div></div>`;
+
+  // BLOCO 4 — Sugestão Estratégica
+  if(sug){
+    h+=`<div style="background:linear-gradient(135deg,rgba(210,153,34,0.12),rgba(210,153,34,0.05));border:1px solid rgba(210,153,34,0.35);border-radius:10px;padding:16px 18px;display:flex;gap:12px;align-items:flex-start">
+      <span style="font-size:20px;flex-shrink:0">💡</span>
+      <div>
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:${goldColor};margin-bottom:5px">Sugestão Estratégica</div>
+        <div style="font-size:13px;color:var(--fg);line-height:1.6">${sug}</div>
+      </div>
+    </div>`;
+  }
+
+  h+=`</div>`; // end outer padding div
+  document.getElementById('content-perfil').innerHTML=h;
+}
+
 function runAIAnalysis(){
   const btn=document.getElementById('btnRunAnalysis');
   btn.disabled=true; btn.textContent='⟳ Calculando...';
   document.getElementById('btnClearAnalysis').style.display='none';
-  ['diagnostico','decisoes','cenarios','acoes'].forEach(t=>{
+  ['diagnostico','decisoes','cenarios','acoes','perfil'].forEach(t=>{
     document.getElementById('content-'+t).innerHTML=`<div class="ai-loader"><div class="ai-loader-dots"><div class="ai-loader-dot"></div><div class="ai-loader-dot"></div><div class="ai-loader-dot"></div></div><div class="ai-loader-text">Processando dados...</div></div>`;
   });
   switchTab('diagnostico');
@@ -1608,6 +1768,7 @@ function runAIAnalysis(){
       renderCenarios(S);
       const _acoes=renderAcoes(S);
       renderResumo(S,_cards,_acoes);
+      renderPerfilPagador(getDataPorCanal());
       btn.disabled=false; btn.textContent='↺ Reanalisar';
       document.getElementById('btnClearAnalysis').style.display='';
     }catch(e){
